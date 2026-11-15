@@ -14,9 +14,11 @@ import {
 import { App as CapApp } from '@capacitor/app';
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem';
 import { Share } from '@capacitor/share';
+import { LocalNotifications } from '@capacitor/local-notifications';
 import { jsPDF } from 'jspdf';
 import { firebaseConfig, OWNER_EMAIL, ADMIN_EMAIL } from './firebase-config.js';
 import { MARCAS } from './vehiculos.js';
+import logoUrl from './logo.png';
 
 /* ---------- Utilidades ---------- */
 const $ = (s) => document.querySelector(s);
@@ -34,7 +36,7 @@ const mesLabel = (m) => { const [y, mm] = m.split('-'); return `${MESES[+mm - 1]
 const fechaCorta = (f) => { const [, m, d] = f.split('-'); return `${+d} ${MESES[+m - 1].slice(0, 3).toLowerCase()}`; };
 const shiftMes = (m, delta) => { const [y, mm] = m.split('-').map(Number); const d = new Date(y, mm - 1 + delta, 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; };
 
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.1.0';
 const ESTADOS = ['Recibido', 'En reparación', 'Listo', 'Entregado'];
 const METODOS = ['Efectivo', 'SINPE Móvil', 'Tarjeta', 'Transferencia'];
 const CATEGORIAS = ['Repuestos y materiales', 'Herramientas', 'Alquiler', 'Electricidad, agua e internet', 'Planilla y CCSS', 'INS', 'Combustible', 'Publicidad', 'Mantenimiento del local', 'Impuestos', 'Otros'];
@@ -74,7 +76,7 @@ function fail(err) {
 /* ---------- Estado ---------- */
 const S = {
   user: null, isOwner: false, isAdmin: false, tab: 'inicio', mes: ymd().slice(0, 7),
-  ordenes: [], pagos: [], gastos: [], vehiculos: {}, categorias: [], sembrando: false, cotizaciones: [], taller: {}, vistaOrd: 'ordenes', docPages: null, docNombre: '',
+  ordenes: [], pagos: [], gastos: [], vehiculos: {}, categorias: [], sembrando: false, cotizaciones: [], taller: {}, repuestos: [], costos: {}, credito: [], creditoTodos: [], credFiltro: 'pendientes', credBusqueda: '', invBusqueda: '', invFiltro: 'todos', vistaOrd: 'ordenes', docPages: null, docNombre: '',
   filtro: 'abiertas', busqueda: '', unsubs: [], unsubMov: null, movDia: ymd(),
   online: navigator.onLine, cierre: null
 };
@@ -121,6 +123,23 @@ function startListeners() {
     },
     fail
   ));
+  S.unsubs.push(onSnapshot(collection(db, 'repuestos'), (snap) => {
+    S.repuestos = snap.docs.map((d) => ({ id: d.id, ...d.data() })).sort((a, b) => (a.nombre || '').localeCompare(b.nombre || ''));
+    render();
+  }, fail));
+  if (S.isOwner) {
+    S.unsubs.push(onSnapshot(collection(db, 'repuestosCosto'), (snap) => {
+      S.costos = {};
+      snap.forEach((d) => { S.costos[d.id] = d.data().costo || 0; });
+      render();
+    }, fail));
+    S.unsubs.push(onSnapshot(query(collection(db, 'gastos'), where('credito', '==', true)), (snap) => {
+      S.creditoTodos = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      S.credito = S.creditoTodos.filter((g) => g.pendientePago === true).sort((a, b) => (a.fechaVence || '').localeCompare(b.fechaVence || ''));
+      render();
+      programarAvisos();
+    }, fail));
+  }
   subscribeMov();
 }
 
@@ -144,6 +163,7 @@ const ICONOS = {
   inicio: '<path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/>',
   ordenes: '<path d="M9 4h6l1 2h3v14H5V6h3z"/><path d="M9 12h6M9 16h4"/>',
   mov: '<path d="M7 4v14M3 14l4 4 4-4"/><path d="M17 20V6M13 10l4-4 4 4"/>',
+  inv: '<path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 7v10l9 4 9-4V7"/><path d="M12 11v10"/>',
   mas: '<path d="M4 7h16M4 12h16M4 17h16"/>'
 };
 
@@ -151,8 +171,8 @@ function render() {
   if (!configurado) return renderSetup();
   if (!S.user) return renderLogin();
   const y = window.scrollY;
-  const vistas = { inicio: vInicio, ordenes: vOrdenes, mov: vMov, mas: vMas };
-  const tabs = [['inicio', 'Inicio'], ['ordenes', 'Órdenes'], ['mov', S.isOwner ? 'Movimientos' : 'Mis registros'], ['mas', 'Más']];
+  const vistas = { inicio: vInicio, ordenes: vOrdenes, inv: vInv, mov: vMov, mas: vMas, cred: vCreditos };
+  const tabs = [['inicio', 'Inicio'], ['ordenes', 'Órdenes'], ['inv', 'Inventario'], ['mov', S.isOwner ? 'Dinero' : 'Registros'], ['mas', 'Más']];
   $('#app').innerHTML = `
     <header class="top">
       <div class="marca">RiCar <span>Solutions</span></div>
@@ -225,14 +245,16 @@ function vInicio() {
   const catList = Object.entries(cats).sort((a, b) => b[1] - a[1]);
   const max = catList.length ? catList[0][1] : 1;
 
-  return `${selectorMes()}
+  return `${alertaCredito()}${selectorMes()}
     <div class="hero"><small>Utilidad de ${mesLabel(S.mes)}</small><div class="cifra ${ut < 0 ? 'neg' : ''}">${signed(ut)}</div></div>
     <div class="libro">
       <div><span>Ingresos</span><b class="ok">${money(ing)}</b></div>
       <div><span>Gastos</span><b class="deuda">${money(gas)}</b></div>
       <div><span>Por cobrar (todas las órdenes)</span><b>${money(porCobrar)}</b></div>
       <div><span>Vehículos en el taller</span><b>${abiertas.length}</b></div>
+      <div><span>Repuestos con stock bajo</span><b>${S.repuestos.filter(stockBajo).length}</b></div>
     </div>
+    ${listaPorPagar()}
     <h3 class="sec">Gastos por categoría</h3>
     ${catList.length ? `<div class="barras">${catList.map(([c, v]) => `<div><div class="barra-t"><span>${esc(c)}</span><b>${money(v)}</b></div><div class="barra"><i style="width:${Math.max(3, v / max * 100)}%"></i></div></div>`).join('')}</div>` : '<div class="vacio">Sin gastos este mes.</div>'}
     <h3 class="sec">En el taller</h3>${enTaller}`;
@@ -295,8 +317,9 @@ function vMov() {
   const filas = items.map((m) => {
     const entra = m.t === 'pago';
     const desc = entra ? (m.placa ? `Cobro · ${m.placa}` : `Ingreso · ${m.concepto || 'Venta suelta'}`) : (m.categoria || 'Gasto');
-    const det = [fechaCorta(m.fecha), m.metodo, (m.porEmail || '').split('@')[0]].filter(Boolean).join(' · ');
-    return `<button class="fila mov ${entra ? 'in' : 'out'}" data-act="mov" data-t="${m.t}" data-id="${m.id}">
+    const cred = !entra && m.credito ? (m.pendientePago ? textoVence(m) : 'Pagado') : '';
+    const det = [fechaCorta(m.fecha), m.metodo, cred, (m.porEmail || '').split('@')[0]].filter(Boolean).join(' · ');
+    return `<button class="fila mov ${entra ? 'in' : 'out'}${!entra && m.pendientePago && diasPara(m.fechaVence) < 0 ? ' venc' : ''}" data-act="mov" data-t="${m.t}" data-id="${m.id}">
       <div class="fila-b"><strong>${esc(desc)}</strong><span>${esc(det)}</span></div>
       <div class="monto">${entra ? '+' : '−'}${money(m.monto)}</div></button>`;
   }).join('');
@@ -308,6 +331,7 @@ function vMov() {
 function vMas() {
   const botones = [];
   if (S.isOwner) {
+    botones.push('<button class="btn oscuro" data-act="ir-cred">Cuentas por pagar (créditos)</button>');
     botones.push('<button class="btn oscuro" data-act="cierre">Cierre de caja</button>');
     botones.push('<button class="btn sec" data-act="categorias">Categorías de gastos</button>');
     botones.push('<button class="btn sec" data-act="taller">Datos del taller (para proformas)</button>');
@@ -465,8 +489,10 @@ function formGasto() {
     </div>
     <div class="campo"><label for="g-pr">Proveedor</label><input id="g-pr" name="proveedor"></div>
     <div class="campo"><label for="g-no">Detalle</label><input id="g-no" name="nota" placeholder="Ej: filtro de aceite"></div>
+    ${htmlCredito()}
     <div class="campo"><label for="g-or">Asociar a una orden (opcional)</label><select id="g-or" name="ordenId"><option value="">Ninguna</option>${opcionesOrden('', false)}</select></div>
     ${htmlLineaGasto()}
+    ${S.isOwner ? htmlIngresoInv(false) : ''}
     <button class="btn" type="submit">Guardar gasto</button></form>`);
 }
 
@@ -529,22 +555,102 @@ const FORMS = {
     const d = Object.fromEntries(new FormData(f));
     const monto = toNum(d.monto);
     if (monto <= 0) return toast('Escribe el monto del gasto');
+    const credito = !!d.credito;
+    if (credito && !d.proveedor.trim()) return toast('Escribe el proveedor de la compra a crédito');
+    if (d.inv && d.ordenId) return toast('Un gasto no puede ir a una orden y al inventario a la vez');
     const o = S.ordenes.find((x) => x.id === d.ordenId);
     const b = writeBatch(db);
-    b.set(doc(collection(db, 'gastos')), {
-      monto, categoria: d.categoria, metodo: d.metodo, fecha: d.fecha, proveedor: d.proveedor.trim(), nota: d.nota.trim(),
+    const gref = doc(collection(db, 'gastos'));
+    const gasto = {
+      monto, categoria: d.categoria, metodo: credito ? 'Crédito' : d.metodo, fecha: d.fecha, proveedor: d.proveedor.trim(), nota: d.nota.trim(),
       ordenId: o ? o.id : null, placa: o ? o.placa : null,
       creadoPor: S.user.uid, porEmail: S.user.email, creadoEn: Date.now()
-    });
+    };
+    if (credito) {
+      const plazo = Math.max(1, Math.round(toNum(d.plazoDias)) || 30);
+      Object.assign(gasto, { credito: true, plazoDias: plazo, fechaVence: sumarDias(d.fecha, plazo), pendientePago: true });
+    }
+    let ing = null;
+    if (d.inv && S.isOwner) {
+      ing = aplicarIngreso(b, d, monto, gref.id);
+      if (ing.error) return toast(ing.error);
+      gasto.inventario = { repuestoId: ing.id, cantidad: ing.cant };
+    }
+    b.set(gref, gasto);
     const agregado = !!(o && d.agregarLinea && agregarLineaOrden(b, o, d));
     b.commit().catch(fail);
     closeSheet();
-    toast(agregado ? 'Gasto guardado y repuesto agregado a la orden' : 'Gasto guardado');
+    toast(ing ? 'Gasto guardado y repuesto ingresado al inventario' : agregado ? 'Gasto guardado y repuesto agregado a la orden' : credito ? 'Gasto a crédito guardado' : 'Gasto guardado');
+  },
+
+  'gasto-pagar': (f) => {
+    const d = Object.fromEntries(new FormData(f));
+    updateDoc(doc(db, 'gastos', d.id), { pendientePago: false, pagadoEn: d.pagadoEn || ymd(), metodoPago: d.metodoPago }).catch(fail);
+    closeSheet();
+    toast('Pago registrado');
+  },
+
+  'gasto-inv': (f) => {
+    const d = Object.fromEntries(new FormData(f));
+    const g = buscarGasto(d.id);
+    if (!g || !S.isOwner) return;
+    const b = writeBatch(db);
+    const ing = aplicarIngreso(b, d, g.monto, g.id);
+    if (ing.error) return toast(ing.error);
+    b.update(doc(db, 'gastos', g.id), { inventario: { repuestoId: ing.id, cantidad: ing.cant } });
+    b.commit().catch(fail);
+    closeSheet();
+    toast('Repuesto ingresado al inventario');
+  },
+
+  repuesto: (f) => {
+    const d = Object.fromEntries(new FormData(f));
+    const nombre = d.nombre.trim();
+    if (!nombre) return toast('Escribe el nombre del repuesto');
+    if (!S.isOwner) return;
+    const b = writeBatch(db);
+    const base = { nombre, codigo: d.codigo.trim(), precioVenta: toNum(d.precioVenta), stockMin: toNum(d.stockMin) };
+    let id = d.id;
+    if (id) b.update(doc(db, 'repuestos', id), base);
+    else {
+      const ref = doc(collection(db, 'repuestos'));
+      id = ref.id;
+      const stock = toQty(d.stock);
+      b.set(ref, { ...base, stock, activo: true, creadoEn: Date.now() });
+      if (stock > 0) {
+        b.set(doc(collection(db, 'movimientosInv')), {
+          repuestoId: id, nombre, tipo: 'entrada', cantidad: stock, nota: 'Inventario inicial', fecha: ymd(),
+          creadoPor: S.user.uid, porEmail: S.user.email, creadoEn: Date.now()
+        });
+      }
+    }
+    if (String(d.costo).trim() !== '') b.set(doc(db, 'repuestosCosto', id), { costo: toNum(d.costo), actualizado: Date.now() }, { merge: true });
+    b.commit().catch(fail);
+    closeSheet();
+    toast('Repuesto guardado');
+  },
+
+  ajuste: (f) => {
+    const d = Object.fromEntries(new FormData(f));
+    const r = S.repuestos.find((x) => x.id === d.id);
+    if (!r || !S.isOwner) return;
+    if (String(d.conteo).trim() === '') return toast('Escribe lo que contaste');
+    const delta = Math.round((toQty(d.conteo) - (Number(r.stock) || 0)) * 1000) / 1000;
+    if (!delta) { closeSheet(); return toast('Las existencias ya coinciden'); }
+    const b = writeBatch(db);
+    b.update(doc(db, 'repuestos', r.id), { stock: increment(delta) });
+    b.set(doc(collection(db, 'movimientosInv')), {
+      repuestoId: r.id, nombre: r.nombre, tipo: 'ajuste', cantidad: delta, nota: d.nota.trim(), fecha: ymd(),
+      creadoPor: S.user.uid, porEmail: S.user.email, creadoEn: Date.now()
+    });
+    b.commit().catch(fail);
+    closeSheet();
+    toast('Existencias ajustadas');
   },
 
   'gasto-orden': (f) => {
     const d = Object.fromEntries(new FormData(f));
-    const g = S.gastos.find((x) => x.id === d.id);
+    const g = buscarGasto(d.id);
     if (!g) return;
     const o = S.ordenes.find((x) => x.id === d.ordenId);
     const b = writeBatch(db);
@@ -557,8 +663,12 @@ const FORMS = {
 
   detalle: (f) => {
     const id = new FormData(f).get('id');
+    const o = S.ordenes.find((x) => x.id === id);
     const lineas = leerLineas(f);
-    updateDoc(doc(db, 'ordenes', id), { lineas, total: lineasTotal(lineas) }).catch(fail);
+    const b = writeBatch(db);
+    if (o) aplicarInventario(b, o.lineas, lineas, { ordenId: o.id, placa: o.placa });
+    b.update(doc(db, 'ordenes', id), { lineas, total: lineasTotal(lineas) });
+    b.commit().catch(fail);
     closeSheet();
     toast('Detalle guardado');
   },
@@ -666,12 +776,14 @@ async function verOrden(id) {
       ]);
       const pagos = p.docs.map((d) => d.data());
       const gastos = g.docs.map((d) => d.data());
-      const gasto = sum(gastos, 'monto');
+      const costoInv = (o.lineas || []).reduce((a, l) => a + (l.rid ? (Number(l.cant) || 0) * (S.costos[l.rid] || 0) : 0), 0);
+      const gasto = sum(gastos, 'monto') + costoInv;
       const el = $('#extra');
-      if (el && (pagos.length || gastos.length)) {
+      if (el && (pagos.length || gastos.length || costoInv)) {
         el.innerHTML = `<h3 class="sec" style="margin-top:6px">Cuentas de la orden</h3><div class="pagos-l">
           ${pagos.map((x) => `<div><span>Cobro ${fechaCorta(x.fecha)} · ${esc(x.metodo)}</span><b>${money(x.monto)}</b></div>`).join('')}
           ${gastos.map((x) => `<div><span>${esc(x.categoria)}${x.nota ? ' · ' + esc(x.nota) : ''}</span><b class="deuda">−${money(x.monto)}</b></div>`).join('')}
+          ${costoInv ? `<div><span>Repuestos del inventario (costo)</span><b class="deuda">−${money(costoInv)}</b></div>` : ''}
           <div><span><b>Ganancia de esta orden</b></span><b class="${sum(pagos, 'monto') - gasto < 0 ? 'deuda' : 'ok'}">${signed(sum(pagos, 'monto') - gasto)}</b></div></div>`;
       }
     } catch (e) { /* sin conexión: se omite el detalle financiero */ }
@@ -679,21 +791,35 @@ async function verOrden(id) {
 }
 
 function verMov(t, id) {
-  const m = (t === 'pago' ? S.pagos : S.gastos).find((x) => x.id === id);
+  const m = t === 'pago' ? S.pagos.find((x) => x.id === id) : buscarGasto(id);
   if (!m) return;
   const filas = t === 'pago'
     ? [['Fecha', fechaCorta(m.fecha)], ['Monto', money(m.monto)], ['Método', m.metodo], ['Orden', m.placa || 'Venta suelta'], ['Detalle', m.concepto || '—'], ['Registrado por', m.porEmail]]
-    : [['Fecha', fechaCorta(m.fecha)], ['Monto', money(m.monto)], ['Categoría', m.categoria], ['Pagado con', m.metodo], ['Proveedor', m.proveedor || '—'], ['Detalle', m.nota || '—'], ['Orden', m.placa || '—'], ['Registrado por', m.porEmail]];
+    : [['Fecha', fechaCorta(m.fecha)], ['Monto', money(m.monto)], ['Categoría', m.categoria], ['Pagado con', m.metodo], ['Proveedor', m.proveedor || '—'], ['Detalle', m.nota || '—'], ['Orden', m.placa || '—'],
+      ...(m.credito ? [['Compra a crédito', `${m.plazoDias} días`], ['Estado del pago', m.pendientePago ? textoVence(m) : `Pagado el ${fechaCorta(m.pagadoEn)} · ${m.metodoPago}`]] : []),
+      ...(m.inventario ? [['Inventario', `Ingresó ${m.inventario.cantidad} al inventario`]] : []),
+      ['Registrado por', m.porEmail]];
   const asociar = t === 'gasto' ? `<form data-form="gasto-orden" data-actual="${esc(m.ordenId || '')}">
       <input type="hidden" name="id" value="${esc(m.id)}"><input type="hidden" name="monto" value="${esc(m.monto)}">
       <div class="campo"><label for="g-or">Orden asociada</label><select id="g-or" name="ordenId"><option value="">Ninguna</option>${opcionesOrden(m.ordenId, false)}</select></div>
       ${htmlLineaGasto()}
       <button class="btn sec" type="submit">Guardar orden asociada</button></form>` : '';
+  const pagar = (t === 'gasto' && m.pendientePago && S.isOwner) ? `<form data-form="gasto-pagar"><input type="hidden" name="id" value="${esc(m.id)}">
+      <div class="fila-2"><div class="campo"><label for="gp-m">Pagado con</label><select id="gp-m" name="metodoPago">${opcionesMetodo()}</select></div>
+      <div class="campo"><label for="gp-f">Fecha de pago</label><input id="gp-f" name="pagadoEn" type="date" value="${ymd()}" required></div></div>
+      <button class="btn" type="submit">Marcar como pagado</button></form>` : '';
+  const ingresar = (t === 'gasto' && S.isOwner && !m.inventario && !m.ordenId) ? `<details class="plegable"><summary>Ingresar este gasto al inventario</summary>
+      <form data-form="gasto-inv"><input type="hidden" name="id" value="${esc(m.id)}"><input type="hidden" name="monto" value="${esc(m.monto)}">${htmlIngresoInv(true)}
+      <button class="btn sec" type="submit">Ingresar al inventario</button></form></details>` : '';
   openSheet(t === 'pago' ? 'Cobro' : 'Gasto', `<dl class="kv">${filas.map(([k, v]) => `<dt>${k}</dt><dd>${esc(v)}</dd>`).join('')}</dl>
+    ${pagar}
     ${asociar}
+    ${ingresar}
     ${S.isOwner ? `<div class="btns"><button class="btn peligro" data-act="borrar-mov" data-t="${t}" data-id="${id}">Eliminar</button></div>` : ''}`);
   const fa = document.querySelector('form[data-form="gasto-orden"]');
   if (fa) { fa.lineaDesc.value = m.nota || m.categoria || 'Repuesto'; precioSugerido(fa); }
+  const fi = document.querySelector('form[data-form="gasto-inv"]');
+  if (fi) { fi.invNombre.value = m.nota || ''; gastoUI(fi); }
 }
 
 /* ---------- Cierre de caja y exportación ---------- */
@@ -712,14 +838,15 @@ function abrirCierre() {
 
 async function calcCierre(fecha) {
   try {
-    const [p, g] = await Promise.all([
+    const [p, g, gp] = await Promise.all([
       getDocs(query(collection(db, 'pagos'), where('fecha', '==', fecha))),
-      getDocs(query(collection(db, 'gastos'), where('fecha', '==', fecha)))
+      getDocs(query(collection(db, 'gastos'), where('fecha', '==', fecha))),
+      getDocs(query(collection(db, 'gastos'), where('pagadoEn', '==', fecha)))
     ]);
     const pagos = p.docs.map((d) => d.data());
     const gastos = g.docs.map((d) => d.data());
     const efIn = sum(pagos.filter((x) => x.metodo === 'Efectivo'), 'monto');
-    const efOut = sum(gastos.filter((x) => x.metodo === 'Efectivo'), 'monto');
+    const efOut = sum(gastos.filter((x) => x.metodo === 'Efectivo'), 'monto') + sum(gp.docs.map((d) => d.data()).filter((x) => x.metodoPago === 'Efectivo'), 'monto');
     S.cierre = { fecha, efIn, efOut };
     const otros = METODOS.slice(1).map((m) => [m, sum(pagos.filter((x) => x.metodo === m), 'monto')]);
     const res = $('#ci-res');
@@ -772,6 +899,7 @@ function lineasResumen(ls) {
 function lineaHtml(l = {}) {
   return `<div class="linea">
     <input name="l-desc" placeholder="Descripción (repuesto o trabajo)" value="${esc(l.desc || '')}" autocomplete="off">
+    <input type="hidden" name="l-rid" value="${esc(l.rid || '')}">${l.rid ? '<span class="sub">Del inventario: baja el stock al guardar</span>' : ''}
     <div class="linea-n">
       <input name="l-cant" inputmode="decimal" value="${l.cant ?? 1}" aria-label="Cantidad">
       <input name="l-precio" inputmode="numeric" placeholder="Precio c/u" value="${l.precio || ''}" aria-label="Precio unitario">
@@ -787,8 +915,12 @@ function editorLineas(ls) {
 
 function leerLineas(f) {
   const fd = new FormData(f);
-  const d = fd.getAll('l-desc'), c = fd.getAll('l-cant'), p = fd.getAll('l-precio');
-  return d.map((desc, i) => ({ desc: String(desc).trim(), cant: toQty(c[i]) || 1, precio: toNum(p[i]) })).filter((l) => l.desc || l.precio);
+  const d = fd.getAll('l-desc'), c = fd.getAll('l-cant'), p = fd.getAll('l-precio'), r = fd.getAll('l-rid');
+  return d.map((desc, i) => {
+    const l = { desc: String(desc).trim(), cant: toQty(c[i]) || 1, precio: toNum(p[i]) };
+    if (r[i]) l.rid = String(r[i]);
+    return l;
+  }).filter((l) => l.desc || l.precio);
 }
 
 function recalcLineas(f) {
@@ -802,6 +934,7 @@ function formDetalle(id) {
   const base = o.lineas && o.lineas.length ? o.lineas : (o.total ? [{ desc: 'Servicio de reparación', cant: 1, precio: o.total }] : []);
   openSheet('Detalle y precio', `<form data-form="detalle"><input type="hidden" name="id" value="${o.id}">
     <p class="sub">Anota cada repuesto y la mano de obra con su precio final. El monto de la orden se calcula solo.</p>
+    ${htmlPickerInv()}
     ${editorLineas(base)}
     <button class="btn" type="submit">Guardar detalle</button></form>`);
 }
@@ -816,6 +949,7 @@ function formCot(c) {
     <div class="campo"><label for="f-cli">Cliente</label><input id="f-cli" name="cliente" value="${esc(v.cliente || '')}"></div>
     <div class="campo"><label for="f-desc">Trabajo a realizar</label><textarea id="f-desc" name="descripcion">${esc(v.descripcion || '')}</textarea></div>
     <label style="font-weight:600;font-size:15px">Detalle de la cotización</label>
+    ${htmlPickerInv()}
     ${editorLineas(v.lineas)}
     <div class="campo"><label for="f-val">Válida por (días)</label><input id="f-val" name="validez" inputmode="numeric" value="${v.validez || S.taller.validezDias || 8}"></div>
     <button class="btn" type="submit">Guardar cotización</button></form>`);
@@ -858,6 +992,7 @@ function aprobarCot(id) {
     lineas: c.lineas, total: c.total, pagado: 0, cotizacionId: c.id,
     creadoPor: S.user.uid, porEmail: S.user.email, creadoEn: Date.now()
   });
+  aplicarInventario(b, [], c.lineas, { ordenId: ref.id, placa: c.placa });
   b.update(doc(db, 'cotizaciones', c.id), { estado: 'Aprobada', ordenId: ref.id });
   b.commit().catch(fail);
   closeSheet();
@@ -865,7 +1000,18 @@ function aprobarCot(id) {
 }
 
 /* ---------- Documentos: proforma y comprobante ---------- */
+let logoImg; // se carga una sola vez; null si no se pudo cargar
+function cargarLogo() {
+  return new Promise((res) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => res(null);
+    i.src = logoUrl;
+  });
+}
+
 async function crearDocumento(d) {
+  if (logoImg === undefined) logoImg = await cargarLogo();
   try {
     await Promise.all([document.fonts.load('700 40px "Barlow Condensed"'), document.fonts.load('600 24px "Barlow"'), document.fonts.load('400 24px "Barlow"')]);
   } catch (e) { /* se usa la fuente de respaldo */ }
@@ -907,17 +1053,28 @@ async function crearDocumento(d) {
   nueva();
   // Encabezado: datos del taller a la izquierda, documento a la derecha
   y = M + 30;
-  txt(t.nombre || 'RiCar Solutions', M, y + 36, `700 66px ${DISP}`);
+  const LH = 190; // alto del logo
+  const LW = logoImg ? Math.round(LH * logoImg.width / logoImg.height) : 0;
+  const x0 = logoImg ? M + LW + 36 : M; // los datos del taller van a la derecha del logo
+  if (logoImg) {
+    g.save();
+    g.beginPath();
+    if (g.roundRect) g.roundRect(M, y, LW, LH, 12); else g.rect(M, y, LW, LH);
+    g.clip();
+    g.drawImage(logoImg, M, y, LW, LH);
+    g.restore();
+  }
+  txt(t.nombre || 'RiCar Solutions', x0, y + 36, `700 ${logoImg ? 54 : 66}px ${DISP}`);
   let yi = y + 76;
   [t.cedula && `Cédula: ${t.cedula}`, t.telefono && `Tel. ${t.telefono}`, t.correo, t.direccion].filter(Boolean).forEach((s) => {
-    envolver(s, 600, `400 26px ${TXT}`).forEach((l) => { txt(l, M, yi, `400 26px ${TXT}`, MUTED); yi += 34; });
+    envolver(s, logoImg ? 400 : 600, `400 26px ${TXT}`).forEach((l) => { txt(l, x0, yi, `400 26px ${TXT}`, MUTED); yi += 34; });
   });
   const proforma = d.tipo === 'proforma';
   txt(proforma ? 'PROFORMA' : 'COMPROBANTE DE TRABAJO', R, y + 36, `700 ${proforma ? 60 : 44}px ${DISP}`, INK, 'right');
   txt(`N.º ${d.numero}`, R, y + 82, `600 28px ${TXT}`, INK, 'right');
   txt(`Fecha: ${fechaLarga(d.fecha)}`, R, y + 118, `400 26px ${TXT}`, MUTED, 'right');
   if (proforma) txt(`Válida hasta: ${fechaLarga(sumarDias(d.fecha, d.validez || 8))}`, R, y + 152, `400 26px ${TXT}`, MUTED, 'right');
-  y = Math.max(yi, y + 170) + 16;
+  y = Math.max(yi, y + 170, logoImg ? y + LH : 0) + 16;
   barra(y, INK, 4);
   y += 40;
 
@@ -1041,8 +1198,331 @@ async function compartirDoc() {
   try { await Share.share({ title: nombre, url: uri, dialogTitle: 'Enviar documento' }); } catch (e) { /* el usuario canceló */ }
 }
 
+/* ---------- Compras a crédito ---------- */
+const diasPara = (f) => {
+  const [y, m, d] = f.split('-').map(Number);
+  const [y2, m2, d2] = ymd().split('-').map(Number);
+  return Math.round((new Date(y, m - 1, d) - new Date(y2, m2 - 1, d2)) / 86400000);
+};
+const estadoCredito = (g) => {
+  if (!g.credito) return null;
+  if (!g.pendientePago) return 'pagado';
+  const d = diasPara(g.fechaVence);
+  return d < 0 ? 'vencido' : d <= 3 ? 'pronto' : 'pendiente';
+};
+function textoVence(g) {
+  const d = diasPara(g.fechaVence);
+  if (d < 0) return `Vencido hace ${-d} día${d === -1 ? '' : 's'}`;
+  if (d === 0) return 'Vence hoy';
+  if (d === 1) return 'Vence mañana';
+  return `Vence en ${d} días (${fechaCorta(g.fechaVence)})`;
+}
+const buscarGasto = (id) => S.gastos.find((x) => x.id === id) || S.credito.find((x) => x.id === id);
+
+function filaCredito(g) {
+  const e = estadoCredito(g);
+  return `<button class="fila mov out ${e === 'vencido' ? 'venc' : e === 'pronto' ? 'pronto' : ''}" data-act="mov" data-t="gasto" data-id="${g.id}">
+    <div class="fila-b"><strong>${esc(g.proveedor || 'Proveedor')}</strong><span>${esc(g.pendientePago ? textoVence(g) : `Pagado el ${fechaCorta(g.pagadoEn || g.fecha)}${g.metodoPago ? ' · ' + g.metodoPago : ''}`)}${g.nota ? ' · ' + esc(g.nota) : ''}</span></div>
+    <div class="monto">${money(g.monto)}</div></button>`;
+}
+
+function alertaCredito() {
+  if (!S.credito.length) return '';
+  const venc = S.credito.filter((g) => diasPara(g.fechaVence) < 0).length;
+  const pronto = S.credito.filter((g) => { const d = diasPara(g.fechaVence); return d >= 0 && d <= 3; }).length;
+  if (venc) return `<button class="alerta rojo" data-act="tab" data-k="inicio">${venc === 1 ? 'Hay 1 pago a proveedor vencido' : `Hay ${venc} pagos a proveedores vencidos`}</button>`;
+  if (pronto) return `<div class="alerta ambar">${pronto === 1 ? '1 pago a proveedor vence' : `${pronto} pagos a proveedores vencen`} en los próximos 3 días</div>`;
+  return '';
+}
+
+function listaPorPagar() {
+  if (!S.creditoTodos.length) return '';
+  const pendientes = S.credito.length
+    ? `<div class="libro"><div><span>Total pendiente</span><b>${money(sum(S.credito, 'monto'))}</b></div></div>
+       <div class="lista">${S.credito.slice(0, 5).map(filaCredito).join('')}</div>`
+    : '<div class="vacio">No hay pagos pendientes a proveedores.</div>';
+  return `<h3 class="sec">Por pagar a proveedores</h3>${pendientes}
+    <button class="btn sec" data-act="ir-cred" style="margin-top:10px">Ver todos los créditos</button>`;
+}
+
+function listaCreditos() {
+  const todos = S.creditoTodos;
+  const q = S.credBusqueda.trim().toLowerCase();
+  let l = todos;
+  if (S.credFiltro === 'pendientes') l = todos.filter((g) => g.pendientePago);
+  else if (S.credFiltro === 'vencidos') l = todos.filter((g) => g.pendientePago && diasPara(g.fechaVence) < 0);
+  else if (S.credFiltro === 'pagados') l = todos.filter((g) => !g.pendientePago);
+  if (q) l = l.filter((g) => (g.proveedor || '').toLowerCase().includes(q) || (g.nota || '').toLowerCase().includes(q));
+  l = [...l].sort((a, b) => {
+    if (!!a.pendientePago !== !!b.pendientePago) return a.pendientePago ? -1 : 1;
+    return a.pendientePago ? (a.fechaVence || '').localeCompare(b.fechaVence || '') : (b.pagadoEn || '').localeCompare(a.pagadoEn || '');
+  });
+  if (!l.length) return '<div class="vacio">No hay créditos con este filtro.</div>';
+  let porProv = '';
+  if (S.credFiltro === 'pendientes' || S.credFiltro === 'vencidos') {
+    const m = {};
+    l.forEach((g) => { const k = g.proveedor || 'Sin proveedor'; m[k] = m[k] || { n: 0, t: 0 }; m[k].n++; m[k].t += g.monto; });
+    porProv = `<h3 class="sec" style="margin-top:6px">Por proveedor</h3><div class="libro">${Object.entries(m).sort((a, b) => b[1].t - a[1].t)
+      .map(([k, v]) => `<div><span>${esc(k)} <span class="sub">(${v.n})</span></span><b>${money(v.t)}</b></div>`).join('')}</div><h3 class="sec">Detalle</h3>`;
+  }
+  return `${porProv}<div class="lista">${l.map(filaCredito).join('')}</div>`;
+}
+
+function vCreditos() {
+  const todos = S.creditoTodos;
+  const pend = todos.filter((g) => g.pendientePago);
+  const venc = pend.filter((g) => diasPara(g.fechaVence) < 0);
+  const semana = pend.filter((g) => { const d = diasPara(g.fechaVence); return d >= 0 && d <= 7; });
+  const f = [['pendientes', `Pendientes (${pend.length})`], ['vencidos', `Vencidos (${venc.length})`], ['pagados', 'Pagados'], ['todos', 'Todos']];
+  return `<button class="link" data-act="tab" data-k="inicio" style="color:var(--ink)">‹ Volver al inicio</button>
+    <h1 class="titulo">Cuentas por pagar</h1>
+    <div class="libro">
+      <div><span>Total pendiente</span><b>${money(sum(pend, 'monto'))}</b></div>
+      <div><span>Vencido</span><b class="${venc.length ? 'deuda' : ''}">${money(sum(venc, 'monto'))}</b></div>
+      <div><span>Vence en los próximos 7 días</span><b>${money(sum(semana, 'monto'))}</b></div>
+    </div>
+    <div class="campo"><input id="buscar-cred" type="search" placeholder="Buscar por proveedor o detalle" value="${esc(S.credBusqueda)}"></div>
+    <div class="chips">${f.map(([k, l]) => `<button class="chip ${S.credFiltro === k ? 'on' : ''}" data-act="cred-filtro" data-k="${k}">${l}</button>`).join('')}</div>
+    <div id="lista-cred">${listaCreditos()}</div>`;
+}
+
+function htmlCredito() {
+  return `<label class="check"><input type="checkbox" name="credito"> Compra a crédito</label>
+    <div id="g-credito" hidden>
+      <div class="campo"><label for="g-pl">Plazo para pagar (días)</label><input id="g-pl" name="plazoDias" inputmode="numeric" value="30"><span class="sub" id="g-vence"></span></div>
+    </div>`;
+}
+
+async function programarAvisos() {
+  if (!S.isOwner) return;
+  try {
+    let perm = await LocalNotifications.checkPermissions();
+    if (perm.display !== 'granted') perm = await LocalNotifications.requestPermissions();
+    if (perm.display !== 'granted') return;
+    const pend = await LocalNotifications.getPending();
+    if (pend.notifications.length) await LocalNotifications.cancel({ notifications: pend.notifications.map((n) => ({ id: n.id })) });
+    const idNum = (s) => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) % 200000000; return h; };
+    const ahora = Date.now();
+    const lista = [];
+    S.credito.forEach((g) => {
+      const [y, m, d] = g.fechaVence.split('-').map(Number);
+      const cuerpo = (t) => `${g.proveedor || 'Proveedor'}: ${money(g.monto)} ${t}`;
+      [[-2, 1, 'vence en 2 días'], [0, 2, 'vence hoy'], [1, 3, 'está vencido']].forEach(([off, k, t]) => {
+        const at = new Date(y, m - 1, d + off, 9, 0, 0);
+        if (at.getTime() > ahora) lista.push({ id: idNum(g.id) * 10 + k, title: 'Pago a proveedor', body: cuerpo(t), schedule: { at, allowWhileIdle: true } });
+      });
+    });
+    if (lista.length) await LocalNotifications.schedule({ notifications: lista });
+  } catch (e) { /* navegador, sin permiso o plugin no disponible */ }
+}
+
+/* ---------- Inventario ---------- */
+const MOV_ROT = { entrada: 'Entrada', salida: 'Salida (orden)', devolucion: 'Devolución (orden)', ajuste: 'Ajuste' };
+const stockBajo = (r) => r.activo !== false && Number(r.stockMin) > 0 && Number(r.stock) <= Number(r.stockMin);
+
+function filaRepuesto(r) {
+  const stock = Number(r.stock) || 0;
+  const k = stock <= 0 ? 'cancelado' : stockBajo(r) ? 'en-reparacion' : 'listo';
+  const costo = S.isOwner ? ` · <span class="sub">costo ${S.costos[r.id] != null ? money(S.costos[r.id]) : '—'}</span>` : '';
+  return `<button class="fila e-l-${k}" data-act="repuesto" data-id="${r.id}">
+    <div class="fila-a"><strong>${esc(r.nombre)}</strong><span class="badge e-${k}">${stock <= 0 ? 'Agotado' : `${stock} en stock`}</span></div>
+    <div class="fila-b"><span>${esc(r.codigo || 'Sin código')}${r.activo === false ? ' · Archivado' : ''}</span></div>
+    <div class="fila-c">Venta ${money(r.precioVenta)}${costo}</div></button>`;
+}
+
+function repuestosFiltrados() {
+  const q = S.invBusqueda.trim().toLowerCase();
+  return S.repuestos.filter((r) => {
+    if (S.invFiltro === 'archivados') return r.activo === false;
+    if (r.activo === false) return false;
+    if (S.invFiltro === 'bajo' && !(stockBajo(r) || Number(r.stock) <= 0)) return false;
+    return !q || (r.nombre || '').toLowerCase().includes(q) || (r.codigo || '').toLowerCase().includes(q);
+  });
+}
+
+function htmlListaInv() {
+  const l = repuestosFiltrados();
+  if (l.length) return `<div class="lista">${l.map(filaRepuesto).join('')}</div>`;
+  return S.repuestos.length ? '<div class="vacio">No hay repuestos con este filtro.</div>'
+    : `<div class="vacio">Todavía no hay repuestos en el inventario.${S.isOwner ? ' Toca "Nuevo repuesto" o registra un gasto con la opción "Ingresa al inventario".' : ''}</div>`;
+}
+
+function vInv() {
+  const f = [['todos', 'Todos'], ['bajo', 'Stock bajo']];
+  if (S.isOwner) f.push(['archivados', 'Archivados']);
+  const valor = S.isOwner ? S.repuestos.filter((r) => r.activo !== false).reduce((a, r) => a + (Number(r.stock) || 0) * (S.costos[r.id] || 0), 0) : 0;
+  return `<h1 class="titulo">Inventario</h1>
+    ${S.isOwner ? `<div class="libro"><div><span>Valor del inventario (a costo)</span><b>${money(valor)}</b></div></div>
+      <button class="btn oscuro" data-act="repuesto-nuevo" style="margin-bottom:12px">Nuevo repuesto</button>` : ''}
+    <div class="campo"><input id="buscar-inv" type="search" placeholder="Buscar por nombre o código" value="${esc(S.invBusqueda)}"></div>
+    <div class="chips">${f.map(([k, l]) => `<button class="chip ${S.invFiltro === k ? 'on' : ''}" data-act="inv-filtro" data-k="${k}">${l}</button>`).join('')}</div>
+    <div id="lista-inv">${htmlListaInv()}</div>`;
+}
+
+async function verRepuesto(id) {
+  const r = S.repuestos.find((x) => x.id === id);
+  if (!r) return;
+  const costo = S.costos[id];
+  openSheet(esc(r.nombre), `
+    <dl class="kv">
+      <dt>Código</dt><dd>${esc(r.codigo || '—')}</dd>
+      <dt>En stock</dt><dd>${Number(r.stock) || 0}</dd>
+      <dt>Stock mínimo</dt><dd>${Number(r.stockMin) || 0}</dd>
+      <dt>Precio de venta</dt><dd>${money(r.precioVenta)}</dd>
+      ${S.isOwner ? `<dt>Costo (última compra)</dt><dd>${costo != null ? money(costo) : '—'}</dd>
+        <dt>Valor en stock</dt><dd>${costo != null ? money((Number(r.stock) || 0) * costo) : '—'}</dd>` : ''}
+    </dl>
+    <h3 class="sec" style="margin-top:6px">Últimos movimientos</h3>
+    <div id="movs-inv" class="pagos-l"><div><span>Cargando…</span></div></div>
+    ${S.isOwner ? `<div class="btns">
+      <button class="btn" data-act="repuesto-ajuste" data-id="${r.id}">Ajustar existencias (conteo)</button>
+      <button class="btn sec" data-act="repuesto-editar" data-id="${r.id}">Editar repuesto</button>
+      <button class="link" data-act="repuesto-archivar" data-id="${r.id}">${r.activo === false ? 'Reactivar repuesto' : 'Archivar repuesto'}</button></div>` : ''}`);
+  try {
+    const snap = await getDocs(query(collection(db, 'movimientosInv'), where('repuestoId', '==', id)));
+    const l = snap.docs.map((d) => d.data()).sort((a, b) => (b.creadoEn || 0) - (a.creadoEn || 0)).slice(0, 10);
+    const el = $('#movs-inv');
+    if (!el) return;
+    el.innerHTML = l.length ? l.map((m) => {
+      const n = m.tipo === 'salida' ? -m.cantidad : m.cantidad;
+      return `<div><span>${fechaCorta(m.fecha)} · ${MOV_ROT[m.tipo] || m.tipo}${m.placa ? ' · ' + esc(m.placa) : ''} · ${esc((m.porEmail || '').split('@')[0])}</span><b class="${n < 0 ? 'deuda' : 'ok'}">${n > 0 ? '+' : ''}${n}</b></div>`;
+    }).join('') : '<div><span>Sin movimientos.</span></div>';
+  } catch (e) {
+    const el = $('#movs-inv');
+    if (el) el.innerHTML = '<div><span>No se pudieron cargar. Revisa la conexión.</span></div>';
+  }
+}
+
+function formRepuesto(r) {
+  const v = r || {};
+  openSheet(r ? 'Editar repuesto' : 'Nuevo repuesto', `<form data-form="repuesto"><input type="hidden" name="id" value="${esc(v.id || '')}">
+    <div class="campo"><label for="r-n">Nombre</label><input id="r-n" name="nombre" value="${esc(v.nombre || '')}" autocomplete="off" required></div>
+    <div class="campo"><label for="r-c">Código (opcional)</label><input id="r-c" name="codigo" value="${esc(v.codigo || '')}" autocomplete="off"></div>
+    <div class="fila-2">
+      <div class="campo"><label for="r-p">Precio de venta</label><input id="r-p" name="precioVenta" inputmode="numeric" value="${v.precioVenta || ''}" placeholder="₡0"></div>
+      <div class="campo"><label for="r-k">Costo por unidad</label><input id="r-k" name="costo" inputmode="numeric" value="${r && S.costos[r.id] != null ? S.costos[r.id] : ''}" placeholder="₡0"></div>
+    </div>
+    <div class="fila-2">
+      ${r ? '' : '<div class="campo"><label for="r-s">Existencias iniciales</label><input id="r-s" name="stock" inputmode="decimal" value="0"></div>'}
+      <div class="campo"><label for="r-m">Stock mínimo</label><input id="r-m" name="stockMin" inputmode="numeric" value="${v.stockMin ?? 1}"></div>
+    </div>
+    <button class="btn" type="submit">Guardar repuesto</button></form>`);
+}
+
+function formAjuste(id) {
+  const r = S.repuestos.find((x) => x.id === id);
+  if (!r) return;
+  openSheet('Ajustar existencias', `<form data-form="ajuste"><input type="hidden" name="id" value="${r.id}">
+    <p class="sub">${esc(r.nombre)}: el sistema dice que hay <b>${Number(r.stock) || 0}</b>. Escribe lo que contaste en la bodega.</p>
+    <div class="campo"><label for="a-c">Existencias reales</label><input id="a-c" name="conteo" inputmode="decimal" required></div>
+    <div class="campo"><label for="a-n">Motivo (opcional)</label><input id="a-n" name="nota" placeholder="Ej: conteo del mes"></div>
+    <button class="btn" type="submit">Guardar ajuste</button></form>`);
+}
+
+function htmlPickerInv() {
+  const l = S.repuestos.filter((r) => r.activo !== false);
+  if (!l.length) return '';
+  return `<div class="picker"><label for="pk-r">Agregar del inventario</label>
+    <select id="pk-r"><option value="">Elegir repuesto…</option>${l.map((r) => `<option value="${r.id}">${esc(r.nombre)} · ${Number(r.stock) || 0} en stock · ${money(r.precioVenta)}</option>`).join('')}</select>
+    <div class="picker-fila"><input id="pk-c" inputmode="decimal" value="1" aria-label="Cantidad"><button type="button" class="btn sec" data-act="pk-agregar">Agregar a la lista</button></div></div>`;
+}
+
+// Diferencia entre las líneas guardadas y las nuevas: baja o devuelve existencias y deja el movimiento
+function aplicarInventario(b, antes, despues, ctx) {
+  const suma = (ls) => { const m = {}; (ls || []).forEach((l) => { if (l.rid) m[l.rid] = (m[l.rid] || 0) + (Number(l.cant) || 0); }); return m; };
+  const a = suma(antes), n = suma(despues);
+  new Set([...Object.keys(a), ...Object.keys(n)]).forEach((id) => {
+    const delta = Math.round(((n[id] || 0) - (a[id] || 0)) * 1000) / 1000;
+    const r = S.repuestos.find((x) => x.id === id);
+    if (!delta || !r) return;
+    b.update(doc(db, 'repuestos', id), { stock: increment(-delta) });
+    b.set(doc(collection(db, 'movimientosInv')), {
+      repuestoId: id, nombre: r.nombre, tipo: delta > 0 ? 'salida' : 'devolucion', cantidad: Math.abs(delta),
+      ordenId: ctx.ordenId || null, placa: ctx.placa || null, fecha: ymd(),
+      creadoPor: S.user.uid, porEmail: S.user.email, creadoEn: Date.now()
+    });
+  });
+}
+
+/* ---------- Ingreso de un gasto al inventario (solo dueño y admin) ---------- */
+function htmlIngresoInv(forzado) {
+  const opts = S.repuestos.filter((r) => r.activo !== false).map((r) => `<option value="${r.id}">${esc(r.nombre)}${r.codigo ? ' · ' + esc(r.codigo) : ''} (hay ${Number(r.stock) || 0})</option>`).join('');
+  return `${forzado ? '<input type="hidden" name="inv" value="on">' : '<label class="check"><input type="checkbox" name="inv"> Ingresa al inventario</label>'}
+    <div id="g-inv" ${forzado ? '' : 'hidden'}>
+      <div class="campo"><label for="g-ir">Repuesto</label><select id="g-ir" name="invRep"><option value="__nuevo">Crear repuesto nuevo…</option>${opts}</select></div>
+      <div id="g-inuevo">
+        <div class="campo"><label for="g-in">Nombre del repuesto</label><input id="g-in" name="invNombre" autocomplete="off"></div>
+        <div class="fila-2">
+          <div class="campo"><label for="g-ic">Código (opcional)</label><input id="g-ic" name="invCodigo" autocomplete="off"></div>
+          <div class="campo"><label for="g-im">Stock mínimo</label><input id="g-im" name="invMin" inputmode="numeric" value="1"></div>
+        </div>
+        <div class="campo"><label for="g-ip">Precio de venta</label><input id="g-ip" name="invPrecio" inputmode="numeric" placeholder="₡0"></div>
+      </div>
+      <div class="campo"><label for="g-iq">Cantidad que ingresa</label><input id="g-iq" name="invCant" inputmode="decimal" value="1"><span class="sub" id="g-iu"></span></div>
+    </div>`;
+}
+
+function aplicarIngreso(b, d, monto, gastoId) {
+  const cant = toQty(d.invCant);
+  if (cant <= 0) return { error: 'Escribe la cantidad que ingresa' };
+  const unit = Math.round(monto / cant);
+  let id = d.invRep, nombre;
+  if (id === '__nuevo') {
+    nombre = (d.invNombre || '').trim();
+    if (!nombre) return { error: 'Escribe el nombre del repuesto' };
+    const ref = doc(collection(db, 'repuestos'));
+    id = ref.id;
+    b.set(ref, { nombre, codigo: (d.invCodigo || '').trim(), precioVenta: toNum(d.invPrecio), stock: cant, stockMin: toNum(d.invMin), activo: true, creadoEn: Date.now() });
+  } else {
+    const r = S.repuestos.find((x) => x.id === id);
+    if (!r) return { error: 'Elige el repuesto' };
+    nombre = r.nombre;
+    b.update(doc(db, 'repuestos', id), { stock: increment(cant) });
+  }
+  b.set(doc(db, 'repuestosCosto', id), { costo: unit, actualizado: Date.now() }, { merge: true });
+  b.set(doc(collection(db, 'movimientosInv')), {
+    repuestoId: id, nombre, tipo: 'entrada', cantidad: cant, gastoId, fecha: ymd(),
+    creadoPor: S.user.uid, porEmail: S.user.email, creadoEn: Date.now()
+  });
+  return { id, cant, nombre };
+}
+
+// Muestra u oculta bloques del formulario de gasto y calcula textos de ayuda
+function gastoUI(f) {
+  if (f.credito) {
+    const c = f.credito.checked;
+    const blk = f.querySelector('#g-credito');
+    if (blk) blk.hidden = !c;
+    if (f.metodo) f.metodo.disabled = c;
+    const pl = Math.max(1, Math.round(toNum(f.plazoDias.value)) || 30);
+    const v = f.querySelector('#g-vence');
+    if (v) v.textContent = c ? `Vence el ${fechaLarga(sumarDias(f.fecha.value || ymd(), pl))}` : '';
+  }
+  if (f.inv && f.inv.type === 'checkbox') {
+    const on = f.inv.checked;
+    f.querySelector('#g-inv').hidden = !on;
+    if (f.ordenId) {
+      f.ordenId.disabled = on;
+      if (on) { f.ordenId.value = ''; actualizarLineaGasto(f); }
+    }
+  }
+  const nuevo = f.invRep && f.invRep.value === '__nuevo';
+  const bn = f.querySelector('#g-inuevo');
+  if (bn) bn.hidden = !nuevo;
+  if (f.invCant) {
+    const q = toQty(f.invCant.value);
+    const m = toNum(f.monto.value);
+    const iu = f.querySelector('#g-iu');
+    if (iu) iu.textContent = q > 0 && m > 0 ? `Costo por unidad: ${money(m / q)}` : '';
+    if (f.invPrecio && !f.invPrecio.dataset.manual && q > 0 && m > 0) {
+      const pct = S.taller.margenRepuestos ?? 25;
+      f.invPrecio.value = Math.round((m / q) * (1 + pct / 100) / 100) * 100;
+    }
+  }
+}
+
 /* ---------- Desarrollo (solo Admin) ---------- */
-const COLS_DATOS = [['ordenes', 'Órdenes'], ['cotizaciones', 'Cotizaciones'], ['pagos', 'Cobros'], ['gastos', 'Gastos'], ['cierres', 'Cierres de caja'], ['vehiculos', 'Vehículos']];
+const COLS_DATOS = [['ordenes', 'Órdenes'], ['cotizaciones', 'Cotizaciones'], ['pagos', 'Cobros'], ['gastos', 'Gastos'], ['cierres', 'Cierres de caja'], ['vehiculos', 'Vehículos'], ['repuestos', 'Repuestos'], ['repuestosCosto', 'Costos de repuestos'], ['movimientosInv', 'Movimientos de inventario']];
 
 function abrirDesarrollo() {
   if (!S.isAdmin) return;
@@ -1056,7 +1536,7 @@ function abrirDesarrollo() {
     </dl>
     <h3 class="sec" style="margin-top:6px">Datos guardados</h3>
     <div id="dev-cuentas" class="libro"><div><span>Contando…</span></div></div>
-    <p class="sub">Borrar los datos de prueba elimina órdenes, cotizaciones, cobros, gastos, cierres de caja y vehículos. No toca las categorías, los datos del taller ni los usuarios. No se puede deshacer.</p>
+    <p class="sub">Borrar los datos de prueba elimina órdenes, cotizaciones, cobros, gastos, cierres de caja, vehículos y todo el inventario. No toca las categorías, los datos del taller ni los usuarios. No se puede deshacer.</p>
     <form data-form="dev-borrar">
       <div class="campo"><label for="dev-c">Para confirmar, escribe BORRAR</label><input id="dev-c" name="confirmar" autocomplete="off" autocapitalize="characters"></div>
       <button class="btn peligro" type="submit">Borrar datos de prueba</button>
@@ -1192,14 +1672,48 @@ const ACT = {
   mov: (d) => verMov(d.t, d.id),
   'borrar-mov': (d) => {
     if (!confirm('¿Eliminar este registro? No se puede deshacer.')) return;
-    const m = (d.t === 'pago' ? S.pagos : S.gastos).find((x) => x.id === d.id);
+    const m = d.t === 'pago' ? S.pagos.find((x) => x.id === d.id) : buscarGasto(d.id);
     if (!m) return;
+    if (m.inventario && !confirm('Este gasto ingresó repuestos al inventario. Las existencias NO se descuentan al eliminarlo. ¿Continuar?')) return;
     const b = writeBatch(db);
     b.delete(doc(db, d.t === 'pago' ? 'pagos' : 'gastos', d.id));
     if (d.t === 'pago' && m.ordenId) b.update(doc(db, 'ordenes', m.ordenId), { pagado: increment(-m.monto) });
     b.commit().catch(fail);
     closeSheet();
     toast('Registro eliminado');
+  },
+  'ir-cred': () => { S.tab = 'cred'; render(); window.scrollTo(0, 0); },
+  'cred-filtro': (d) => { S.credFiltro = d.k; render(); },
+  repuesto: (d) => verRepuesto(d.id),
+  'repuesto-nuevo': () => formRepuesto(null),
+  'repuesto-editar': (d) => formRepuesto(S.repuestos.find((x) => x.id === d.id)),
+  'repuesto-ajuste': (d) => formAjuste(d.id),
+  'repuesto-archivar': (d) => {
+    const r = S.repuestos.find((x) => x.id === d.id);
+    if (!r) return;
+    updateDoc(doc(db, 'repuestos', d.id), { activo: r.activo === false }).catch(fail);
+    closeSheet();
+    toast(r.activo === false ? 'Repuesto reactivado' : 'Repuesto archivado');
+  },
+  'inv-filtro': (d) => { S.invFiltro = d.k; render(); },
+  'pk-agregar': (d, el) => {
+    const sel = $('#pk-r');
+    const r = S.repuestos.find((x) => x.id === sel.value);
+    if (!r) return toast('Elige un repuesto');
+    const cant = toQty($('#pk-c').value) || 1;
+    if (cant > (Number(r.stock) || 0) && !confirm(`Solo hay ${Number(r.stock) || 0} en stock. ¿Agregar de todos modos?`)) return;
+    const filas = [...$('#lineas').querySelectorAll('.linea')];
+    const ya = filas.find((row) => row.querySelector('[name="l-rid"]').value === r.id);
+    if (ya) {
+      const c = ya.querySelector('[name="l-cant"]');
+      c.value = toQty(c.value) + cant;
+    } else {
+      if (filas.length === 1 && !filas[0].querySelector('[name="l-desc"]').value && !filas[0].querySelector('[name="l-precio"]').value) filas[0].remove();
+      $('#lineas').insertAdjacentHTML('beforeend', lineaHtml({ desc: r.nombre, cant, precio: r.precioVenta, rid: r.id }));
+    }
+    sel.value = '';
+    $('#pk-c').value = '1';
+    recalcLineas(el.closest('form'));
   },
   cierre: abrirCierre,
   categorias: abrirCategorias,
@@ -1266,6 +1780,21 @@ document.addEventListener('input', (e) => {
   }
   if (e.target.matches('[data-cierre]') && e.target.name !== 'fecha') updCierre();
   if (e.target.name === 'l-cant' || e.target.name === 'l-precio') recalcLineas(e.target.form);
+  if (e.target.id === 'buscar-cred') {
+    S.credBusqueda = e.target.value;
+    $('#lista-cred').innerHTML = listaCreditos();
+  }
+  if (e.target.id === 'buscar-inv') {
+    S.invBusqueda = e.target.value;
+    $('#lista-inv').innerHTML = htmlListaInv();
+  }
+  const hf = e.target.form;
+  if (hf && ['gasto', 'gasto-inv'].includes(hf.dataset.form)) {
+    if (e.target.name === 'invPrecio') e.target.dataset.manual = '1';
+    if (e.target.name === 'invNombre') e.target.dataset.manual = '1';
+    if (e.target.name === 'nota' && hf.invNombre && !hf.invNombre.dataset.manual) hf.invNombre.value = e.target.value;
+    gastoUI(hf);
+  }
   const gf = e.target.form;
   if (gf && ['gasto', 'gasto-orden'].includes(gf.dataset.form)) {
     if (e.target.name === 'monto') precioSugerido(gf);
@@ -1276,6 +1805,7 @@ document.addEventListener('input', (e) => {
 });
 
 document.addEventListener('change', (e) => {
+  if (e.target.form && ['gasto', 'gasto-inv'].includes(e.target.form.dataset.form)) gastoUI(e.target.form);
   if (e.target.name === 'ordenId' && e.target.form && ['gasto', 'gasto-orden'].includes(e.target.form.dataset.form)) {
     const f = e.target.form;
     actualizarLineaGasto(f);
@@ -1314,7 +1844,7 @@ if (configurado) {
   onAuthStateChanged(auth, (u) => {
     stopAll();
     S.user = u;
-    S.ordenes = []; S.pagos = []; S.gastos = []; S.categorias = []; S.cotizaciones = []; S.taller = {};
+    S.ordenes = []; S.pagos = []; S.gastos = []; S.categorias = []; S.cotizaciones = []; S.taller = {}; S.repuestos = []; S.costos = {}; S.credito = []; S.creditoTodos = [];
     if (u) {
       const em = (u.email || '').toLowerCase();
       S.isAdmin = em === ADMIN_EMAIL.toLowerCase();

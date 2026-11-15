@@ -144,6 +144,20 @@ h3.sec { font-size: 22px; margin: 22px 0 10px; }
 .linea-n .chip { min-width: 46px; padding: 0; }
 .doc-img { display: block; width: 100%; margin-bottom: 10px; background: #fff; border: 1px solid var(--line); border-radius: 4px; }
 
+/* Alertas, crédito e inventario */
+.alerta { display: block; width: 100%; text-align: left; padding: 12px 14px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; border: 2px solid; }
+.alerta.rojo { background: #efd5d1; color: var(--red); border-color: var(--red); }
+.alerta.ambar { background: #f6e3bb; color: var(--amber); border-color: var(--amber); }
+.fila.mov.venc { border-left-color: var(--red); background: #f6e9e7; }
+.fila.mov.pronto { border-left-color: var(--yellow); }
+.picker { margin-bottom: 12px; padding: 10px; border: 1px dashed var(--line); border-radius: 8px; }
+.picker label { display: block; font-weight: 600; font-size: 15px; margin-bottom: 6px; }
+.picker select, .picker input { min-height: 50px; padding: 8px 12px; background: #fff; border: 2px solid var(--line); border-radius: 8px; width: 100%; }
+.picker-fila { display: grid; grid-template-columns: 90px 1fr; gap: 8px; margin-top: 8px; }
+details.plegable { margin: 12px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); padding: 0 12px; }
+details.plegable summary { min-height: 48px; display: flex; align-items: center; font-weight: 600; cursor: pointer; }
+details.plegable form { padding-bottom: 12px; }
+
 /* Casilla de repuesto */
 .check { display: flex; gap: 12px; align-items: center; min-height: 48px; font-weight: 600; margin-bottom: 8px; }
 .check input { width: 26px; height: 26px; accent-color: var(--ink); }
@@ -159,8 +173,8 @@ nav.nav {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 5; background: var(--surface);
   border-top: 1px solid var(--line); padding-bottom: env(safe-area-inset-bottom, 0px);
 }
-.navin { max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: repeat(4, 1fr); }
-.navin button { display: grid; justify-items: center; gap: 2px; padding: 8px 0 8px; min-height: 60px; border: 0; background: none; color: var(--muted); font-size: 13px; font-weight: 600; }
+.navin { max-width: 560px; margin: 0 auto; display: grid; grid-template-columns: repeat(5, 1fr); }
+.navin button { display: grid; justify-items: center; gap: 2px; padding: 8px 0 8px; min-height: 60px; border: 0; background: none; color: var(--muted); font-size: 12px; font-weight: 600; }
 .navin button.on { color: var(--ink); box-shadow: inset 0 3px 0 var(--yellow); }
 .navin svg { width: 24px; height: 24px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 
