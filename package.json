@@ -1,0 +1,25 @@
+{
+  "name": "ricar-solutions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "RiCar Solutions - administración del taller (Capacitor)",
+  "scripts": {
+    "build": "esbuild src/app.js --bundle --minify --outdir=www --loader:.woff2=file --loader:.woff=file --asset-names=assets/[name] --target=chrome90 --external:canvg --external:html2canvas --external:dompurify --external:core-js",
+    "android:prepare": "npm run build && cap add android && node scripts/customize-android.mjs && cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.6.0",
+    "@capacitor/app": "^8.1.2",
+    "@capacitor/core": "^8.6.0",
+    "@capacitor/filesystem": "^8.1.5",
+    "@capacitor/share": "^8.0.3",
+    "firebase": "^11.0.0",
+    "jspdf": "^4.2.1"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.6.0",
+    "@fontsource/barlow": "^5.1.0",
+    "@fontsource/barlow-condensed": "^5.1.0",
+    "esbuild": "^0.24.0"
+  }
+}

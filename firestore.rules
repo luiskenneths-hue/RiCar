@@ -1,0 +1,70 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+
+    // Correos del Admin y del Dueño (los mismos de firebase-config.js)
+    function isAdmin() {
+      return signedIn() && request.auth.token.email.lower() == 'luiskenneths@gmail.com';
+    }
+
+    // El Admin tiene los mismos permisos de datos que el Dueño
+    function isOwner() {
+      return signedIn() && (request.auth.token.email.lower() == 'ricarsolutions@gmail.com' || isAdmin());
+    }
+
+    // Órdenes: ambos ven y crean; el perfil Taller solo cambia campos operativos
+    match /ordenes/{id} {
+      allow read, create: if signedIn();
+      allow update: if isOwner() || (signedIn() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(
+          ['estado','pagado','problema','trabajos','cliente','telefono','marca','total','entregadoEn','placa','lineas','marcaV','modelo','anio']));
+      allow delete: if isOwner();
+    }
+
+    match /vehiculos/{id} {
+      allow read, create, update: if signedIn();
+      allow delete: if isOwner();
+    }
+
+    // Cobros y gastos: el perfil Taller crea y solo ve lo que él registró
+    match /pagos/{id} {
+      allow create: if signedIn() && request.resource.data.creadoPor == request.auth.uid;
+      allow read: if isOwner() || (signedIn() && resource.data.creadoPor == request.auth.uid);
+      allow update, delete: if isOwner();
+    }
+
+    match /gastos/{id} {
+      allow create: if signedIn() && request.resource.data.creadoPor == request.auth.uid;
+      allow read: if isOwner() || (signedIn() && resource.data.creadoPor == request.auth.uid);
+      // El perfil Taller solo puede cambiar la orden asociada de sus propios gastos
+      allow update: if isOwner() || (signedIn() && resource.data.creadoPor == request.auth.uid &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['ordenId','placa']));
+      allow delete: if isOwner();
+    }
+
+    // Cotizaciones (proformas): ambos las crean y editan; solo el dueño las borra
+    match /cotizaciones/{id} {
+      allow read, create, update: if signedIn();
+      allow delete: if isOwner();
+    }
+
+    // Datos del taller (encabezado de documentos): todos leen, solo el dueño edita
+    match /config/{id} {
+      allow read: if signedIn();
+      allow write: if isOwner();
+    }
+
+    // Categorías de gastos: todos las leen, solo el dueño las modifica
+    match /categorias/{id} {
+      allow read: if signedIn();
+      allow write: if isOwner();
+    }
+
+    // Cierres de caja: solo el dueño
+    match /cierres/{id} {
+      allow read, write: if isOwner();
+    }
+  }
+}
