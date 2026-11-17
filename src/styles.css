@@ -144,6 +144,8 @@ h3.sec { font-size: 22px; margin: 22px 0 10px; }
 .linea-n .chip { min-width: 46px; padding: 0; }
 .doc-img { display: block; width: 100%; margin-bottom: 10px; background: #fff; border: 1px solid var(--line); border-radius: 4px; }
 
+.firma-pad { display: block; width: 100%; height: 150px; touch-action: none; background: #fff; border: 2px dashed var(--ink); border-radius: 8px; margin: 6px 0 12px; }
+
 /* Alertas, crédito e inventario */
 .alerta { display: block; width: 100%; text-align: left; padding: 12px 14px; border-radius: 8px; font-weight: 600; margin-bottom: 12px; border: 2px solid; }
 .alerta.rojo { background: #efd5d1; color: var(--red); border-color: var(--red); }

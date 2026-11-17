@@ -16,6 +16,19 @@ if (!xml.includes('POST_NOTIFICATIONS')) {
 fs.writeFileSync(manifest, xml);
 console.log('AndroidManifest personalizado');
 
+/* ---- Número de versión: sube en cada compilación para que Android la instale encima de la anterior ---- */
+try {
+  const gradle = 'android/app/build.gradle';
+  let g = fs.readFileSync(gradle, 'utf8');
+  const antes = g;
+  g = g.replace(/versionCode\s+\d+/, 'versionCode Integer.parseInt(System.getenv("VERSION_CODE") ?: "1")');
+  g = g.replace(/versionName\s+"[^"]*"/, 'versionName "1.2.${System.getenv("VERSION_CODE") ?: "0"}"');
+  if (g === antes) console.warn('AVISO: no se encontró versionCode en build.gradle; la versión no sube sola.');
+  else { fs.writeFileSync(gradle, g); console.log('Versión automática configurada'); }
+} catch (e) {
+  console.warn('AVISO: no se pudo configurar la versión automática:', e.message);
+}
+
 /* ---- Ícono y pantalla de arranque ---- */
 const res = 'android/app/src/main/res';
 const densidades = ['mdpi', 'hdpi', 'xhdpi', 'xxhdpi', 'xxxhdpi'];

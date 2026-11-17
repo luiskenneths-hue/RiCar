@@ -8,7 +8,7 @@ import { initializeApp } from 'firebase/app';
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from 'firebase/auth';
 import {
   initializeFirestore, persistentLocalCache, persistentSingleTabManager,
-  collection, doc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, limit,
+  collection, doc, getDoc, getDocs, setDoc, updateDoc, onSnapshot, query, where, orderBy, limit,
   writeBatch, increment
 } from 'firebase/firestore';
 import { App as CapApp } from '@capacitor/app';
@@ -36,7 +36,19 @@ const mesLabel = (m) => { const [y, mm] = m.split('-'); return `${MESES[+mm - 1]
 const fechaCorta = (f) => { const [, m, d] = f.split('-'); return `${+d} ${MESES[+m - 1].slice(0, 3).toLowerCase()}`; };
 const shiftMes = (m, delta) => { const [y, mm] = m.split('-').map(Number); const d = new Date(y, mm - 1 + delta, 1); return `${d.getFullYear()}-${pad(d.getMonth() + 1)}`; };
 
-const APP_VERSION = '1.1.0';
+const APP_VERSION = '1.3.0';
+const COMBUSTIBLE = ['Vacío', '1/4', '1/2', '3/4', 'Lleno'];
+const kmTxt = (n) => String(Math.round(Number(n) || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, ' ') + ' km';
+const CONDICIONES_DEFECTO = 'El cliente autoriza al taller a revisar el vehículo según el problema reportado. El kilometraje, el nivel de combustible y el estado del vehículo quedan registrados al momento del ingreso. Cualquier trabajo adicional será consultado con el cliente antes de realizarse.';
+const horaTxt = (ms) => { const d = new Date(ms); const h = d.getHours(); return `${h % 12 || 12}:${pad(d.getMinutes())} ${h >= 12 ? 'p. m.' : 'a. m.'}`; };
+const esperarOrden = (id) => new Promise((res) => {
+  let n = 0;
+  const t = setInterval(() => {
+    const o = S.ordenes.find((x) => x.id === id);
+    if (o || ++n > 25) { clearInterval(t); res(o || null); }
+  }, 100);
+});
+const FIRMA = { dibujando: false, vacio: true };
 const ESTADOS = ['Recibido', 'En reparación', 'Listo', 'Entregado'];
 const METODOS = ['Efectivo', 'SINPE Móvil', 'Tarjeta', 'Transferencia'];
 const CATEGORIAS = ['Repuestos y materiales', 'Herramientas', 'Alquiler', 'Electricidad, agua e internet', 'Planilla y CCSS', 'INS', 'Combustible', 'Publicidad', 'Mantenimiento del local', 'Impuestos', 'Otros'];
@@ -463,9 +475,14 @@ function formOrden(o) {
     ${vehiculoHtml(v)}
     <div class="campo"><label for="f-tel">Teléfono</label><input id="f-tel" name="telefono" type="tel" value="${esc(v.telefono || '')}"></div>
     <div class="campo"><label for="f-cli">Cliente</label><input id="f-cli" name="cliente" value="${esc(v.cliente || '')}"></div>
+    <div class="fila-2">
+      <div class="campo"><label for="f-km">Kilometraje actual</label><input id="f-km" name="km" inputmode="numeric" value="${v.km || ''}" placeholder="Ej: 85400"></div>
+      <div class="campo"><label for="f-comb">Combustible</label><select id="f-comb" name="combustible"><option value="">Elegir…</option>${COMBUSTIBLE.map((c) => `<option ${c === v.combustible ? 'selected' : ''}>${c}</option>`).join('')}</select></div>
+    </div>
     <div class="campo"><label for="f-prob">Problema</label><textarea id="f-prob" name="problema" required>${esc(v.problema || '')}</textarea></div>
     ${o ? `<div class="campo"><label for="f-trab">Trabajos realizados</label><textarea id="f-trab" name="trabajos">${esc(v.trabajos || '')}</textarea></div>` : ''}
     <div class="campo"><label for="f-total">Monto a cobrar</label><input id="f-total" name="total" inputmode="numeric" value="${v.total || ''}" placeholder="₡0" ${tieneLineas ? 'readonly' : ''}>${tieneLineas ? '<span class="sub">Se calcula con el detalle del trabajo.</span>' : ''}</div>
+    ${o ? '' : '<label class="check"><input type="checkbox" name="pedirFirma" checked> Pedir la firma de recepción al guardar</label>'}
     <button class="btn" type="submit">Guardar orden</button></form>`);
 }
 
@@ -516,21 +533,41 @@ const FORMS = {
     if (!d.problema.trim()) return toast('Describe el problema');
     const veh = { placa, ...leerVeh(d), cliente: d.cliente.trim(), telefono: d.telefono.trim() };
     const b = writeBatch(db);
+    let nuevaRef = null;
     b.set(doc(db, 'vehiculos', placa), veh, { merge: true });
     if (d.id) {
       const ex = S.ordenes.find((x) => x.id === d.id);
-      const patch = { ...veh, problema: d.problema.trim(), trabajos: (d.trabajos || '').trim() };
+      const patch = { ...veh, km: String(d.km || '').trim() ? toNum(d.km) : null, combustible: d.combustible || '', problema: d.problema.trim(), trabajos: (d.trabajos || '').trim() };
       if (!(ex && ex.lineas && ex.lineas.length)) patch.total = toNum(d.total);
       b.update(doc(db, 'ordenes', d.id), patch);
     } else {
-      b.set(doc(collection(db, 'ordenes')), {
-        numero: nuevoNumero(), ...veh, problema: d.problema.trim(), trabajos: '', estado: 'Recibido',
+      nuevaRef = doc(collection(db, 'ordenes'));
+      b.set(nuevaRef, {
+        numero: nuevoNumero(), ...veh, km: String(d.km || '').trim() ? toNum(d.km) : null, combustible: d.combustible || '', problema: d.problema.trim(), trabajos: '', estado: 'Recibido',
         total: toNum(d.total), pagado: 0, creadoPor: S.user.uid, porEmail: S.user.email, creadoEn: Date.now()
       });
     }
     b.commit().catch(fail);
     closeSheet();
     toast('Orden guardada');
+    if (nuevaRef && d.pedirFirma) esperarOrden(nuevaRef.id).then((o) => { if (o) abrirRecepcion(o.id); });
+  },
+
+  recepcion: (f) => {
+    const d = Object.fromEntries(new FormData(f));
+    const o = S.ordenes.find((x) => x.id === d.id);
+    if (!o) return;
+    if (FIRMA.vacio) return toast('Pide al cliente que firme en el recuadro');
+    const firma = $('#firma').toDataURL('image/png');
+    const obs = (d.observaciones || '').trim();
+    const firmante = (d.firmante || '').trim();
+    const ahora = Date.now();
+    const quien = (S.user.email || '').split('@')[0];
+    const b = writeBatch(db);
+    b.set(doc(db, 'recepciones', o.id), { ordenId: o.id, firma, firmante, observaciones: obs, recepcionEn: ahora, recepcionPor: quien });
+    b.update(doc(db, 'ordenes', o.id), { observaciones: obs, recepcionFirmada: true, recepcionEn: ahora });
+    b.commit().catch(fail);
+    verRecepcionDoc(o.id, { firma, firmante, observaciones: obs, recepcionEn: ahora, recepcionPor: quien });
   },
 
   cobro: (f) => {
@@ -700,7 +737,8 @@ const FORMS = {
     setDoc(doc(db, 'config', 'taller'), {
       nombre: d.nombre.trim(), cedula: d.cedula.trim(), telefono: d.telefono.trim(), correo: d.correo.trim(),
       direccion: d.direccion.trim(), notaPie: d.notaPie.trim(), validezDias: Math.max(1, Math.round(toNum(d.validezDias)) || 8),
-      margenRepuestos: d.margenRepuestos === '' ? 25 : toNum(d.margenRepuestos)
+      margenRepuestos: d.margenRepuestos === '' ? 25 : toNum(d.margenRepuestos),
+      condicionesRecepcion: (d.condicionesRecepcion || '').trim()
     }).catch(fail);
     closeSheet();
     toast('Datos del taller guardados');
@@ -749,6 +787,10 @@ async function verOrden(id) {
     <dl class="kv">
       <dt>Cliente</dt><dd>${esc(o.cliente || '—')}</dd>
       <dt>Vehículo</dt><dd>${esc(o.marca || '—')}</dd>
+      <dt>Kilometraje</dt><dd>${o.km ? kmTxt(o.km) : '—'}</dd>
+      <dt>Combustible</dt><dd>${esc(o.combustible || '—')}</dd>
+      <dt>Recepción</dt><dd>${o.recepcionFirmada ? 'Firmada el ' + fechaCorta(ymd(new Date(o.recepcionEn))) : 'Sin firmar'}</dd>
+      ${o.observaciones ? `<dt>Estado al recibir</dt><dd>${esc(o.observaciones)}</dd>` : ''}
       <dt>Teléfono</dt><dd>${o.telefono ? `<a href="tel:${esc(o.telefono)}">${esc(o.telefono)}</a>` : '—'}</dd>
       <dt>Problema</dt><dd>${esc(o.problema)}</dd>
       ${o.trabajos ? `<dt>Trabajos</dt><dd>${esc(o.trabajos)}</dd>` : ''}
@@ -763,6 +805,7 @@ async function verOrden(id) {
       ${sig ? `<button class="btn oscuro" data-act="estado" data-id="${o.id}" data-val="${sig}">Pasar a ${sig.toLowerCase()}</button>` : ''}
       ${o.telefono ? `<a class="btn sec" style="text-decoration:none;display:grid;place-items:center" href="https://wa.me/506${esc(o.telefono.replace(/\D/g, '').replace(/^506/, ''))}">WhatsApp al cliente</a>` : ''}
       <button class="btn sec" data-act="detalle" data-id="${o.id}">Detalle y precio (repuestos y mano de obra)</button>
+      <button class="btn sec" data-act="recepcion" data-id="${o.id}">Hoja de recepción${o.recepcionFirmada ? ' (firmada)' : ''}</button>
       <button class="btn sec" data-act="doc-orden" data-id="${o.id}">Ver comprobante del trabajo</button>
       <button class="btn sec" data-act="editar" data-id="${o.id}">Editar datos</button>
       ${!cerrada ? `<button class="link" data-act="estado" data-id="${o.id}" data-val="Cancelado">Cancelar orden</button>` : ''}
@@ -1000,6 +1043,15 @@ function aprobarCot(id) {
 }
 
 /* ---------- Documentos: proforma y comprobante ---------- */
+function cargarImagen(url) {
+  return new Promise((res) => {
+    const i = new Image();
+    i.onload = () => res(i);
+    i.onerror = () => res(null);
+    i.src = url;
+  });
+}
+
 let logoImg; // se carga una sola vez; null si no se pudo cargar
 function cargarLogo() {
   return new Promise((res) => {
@@ -1070,9 +1122,11 @@ async function crearDocumento(d) {
     envolver(s, logoImg ? 400 : 600, `400 26px ${TXT}`).forEach((l) => { txt(l, x0, yi, `400 26px ${TXT}`, MUTED); yi += 34; });
   });
   const proforma = d.tipo === 'proforma';
-  txt(proforma ? 'PROFORMA' : 'COMPROBANTE DE TRABAJO', R, y + 36, `700 ${proforma ? 60 : 44}px ${DISP}`, INK, 'right');
+  const recepcion = d.tipo === 'recepcion';
+  txt(proforma ? 'PROFORMA' : recepcion ? 'HOJA DE RECEPCIÓN' : 'COMPROBANTE DE TRABAJO', R, y + 36, `700 ${proforma ? 60 : recepcion ? 50 : 44}px ${DISP}`, INK, 'right');
   txt(`N.º ${d.numero}`, R, y + 82, `600 28px ${TXT}`, INK, 'right');
   txt(`Fecha: ${fechaLarga(d.fecha)}`, R, y + 118, `400 26px ${TXT}`, MUTED, 'right');
+  if (recepcion && d.hora) txt(`Hora de ingreso: ${d.hora}`, R, y + 152, `400 26px ${TXT}`, MUTED, 'right');
   if (proforma) txt(`Válida hasta: ${fechaLarga(sumarDias(d.fecha, d.validez || 8))}`, R, y + 152, `400 26px ${TXT}`, MUTED, 'right');
   y = Math.max(yi, y + 170, logoImg ? y + LH : 0) + 16;
   barra(y, INK, 4);
@@ -1090,9 +1144,54 @@ async function crearDocumento(d) {
   if (g.roundRect) g.roundRect(R - pw, y + 34, pw, 66, 8); else g.rect(R - pw, y + 34, pw, 66);
   g.fill(); g.stroke();
   txt(d.placa, R - pw / 2, y + 86, `700 52px ${DISP}`, INK, 'center');
-  if (d.marca) txt(d.marca, R, y + 134, `400 26px ${TXT}`, MUTED, 'right');
-  y += 164;
+  let yv = y + 134;
+  if (d.marca) { txt(d.marca, R, yv, `400 26px ${TXT}`, MUTED, 'right'); yv += 32; }
+  const ingreso = [d.km ? kmTxt(d.km) : '', d.combustible ? `Combustible ${d.combustible}` : ''].filter(Boolean).join(' · ');
+  if (ingreso) { txt(ingreso, R, yv, `400 26px ${TXT}`, MUTED, 'right'); yv += 32; }
+  y = Math.max(y + 164, yv + 12);
 
+  const firmaImg = recepcion && d.firma ? await cargarImagen(d.firma) : null;
+  if (recepcion) {
+    const parrafo = (titulo, texto, font, color, maxLineas) => {
+      if (y + 80 > H - M) nueva();
+      txt(titulo, M, y + 22, `600 22px ${TXT}`, MUTED);
+      y += 38;
+      envolver(texto, R - M, font).slice(0, maxLineas).forEach((l) => {
+        if (y + 40 > H - M) nueva();
+        txt(l, M, y + 24, font, color);
+        y += 36;
+      });
+      y += 18;
+    };
+    // Datos de ingreso: kilometraje y medidor de combustible
+    txt('Datos de ingreso', M, y + 22, `600 22px ${TXT}`, MUTED);
+    y += 38;
+    barra(y, '#f3f4f5', 128);
+    txt('Kilometraje', M + 24, y + 40, `600 22px ${TXT}`, MUTED);
+    txt(d.km ? kmTxt(d.km) : 'No registrado', M + 24, y + 96, `700 46px ${DISP}`);
+    txt('Nivel de combustible', 640, y + 40, `600 22px ${TXT}`, MUTED);
+    const niv = COMBUSTIBLE.indexOf(d.combustible);
+    for (let i = 0; i < 4; i++) {
+      g.fillStyle = niv > i ? INK : '#d4d9dd';
+      g.fillRect(640 + i * 110, y + 56, 100, 30);
+    }
+    txt(d.combustible || 'No registrado', 640, y + 116, `600 26px ${TXT}`, INK);
+    y += 128 + 30;
+    parrafo('Problema reportado por el cliente', d.descripcion || 'No indicado', `400 28px ${TXT}`, INK, 8);
+    parrafo('Estado del vehículo al recibirlo', d.observaciones || 'Sin observaciones registradas.', `400 28px ${TXT}`, INK, 8);
+    parrafo('Condiciones', d.condiciones, `400 24px ${TXT}`, MUTED, 12);
+    // Firma digital del cliente
+    if (y + 320 > H - M) nueva();
+    y += 10;
+    const sw = 540, sh = Math.round(sw * 300 / 800);
+    if (firmaImg) g.drawImage(firmaImg, M, y, sw, sh);
+    g.fillStyle = INK;
+    g.fillRect(M, y + sh + 8, sw, 3);
+    txt(`Firma del cliente: ${d.firmante || d.cliente || ''}`, M, y + sh + 44, `600 26px ${TXT}`);
+    txt(d.firmadoEn ? `Firmado digitalmente el ${fechaLarga(ymd(new Date(d.firmadoEn)))}, ${horaTxt(d.firmadoEn)}` : 'Firma pendiente', M, y + sh + 78, `400 22px ${TXT}`, MUTED);
+    if (d.recibidoPor) txt(`Recibido por: ${d.recibidoPor}`, R, y + sh + 44, `600 26px ${TXT}`, INK, 'right');
+    y += sh + 100;
+  } else {
   // Descripción del trabajo
   if (d.descripcion) {
     txt(proforma ? 'Trabajo a realizar' : 'Trabajo realizado', M, y + 22, `600 22px ${TXT}`, MUTED);
@@ -1150,6 +1249,7 @@ async function crearDocumento(d) {
     txt(l, M, y + 24, `400 24px ${TXT}`, MUTED);
     y += 32;
   }));
+  }
   if (pages.length > 1) {
     pages.forEach((c, i) => {
       const gg = c.getContext('2d');
@@ -1158,6 +1258,71 @@ async function crearDocumento(d) {
     });
   }
   return pages;
+}
+
+async function verRecepcionDoc(id, extra = {}) {
+  const base = S.ordenes.find((x) => x.id === id);
+  if (!base) return;
+  const pick = (k) => (k in extra ? extra[k] : base[k]);
+  let firma = extra.firma, firmante = pick('firmante'), firmadoEn = pick('recepcionEn'), recibidoPor = pick('recepcionPor');
+  if (firma === undefined) {
+    firma = null;
+    if (base.recepcionFirmada) {
+      try {
+        const snap = await getDoc(doc(db, 'recepciones', id));
+        if (snap.exists()) {
+          const r = snap.data();
+          firma = r.firma || null; firmante = r.firmante; firmadoEn = r.recepcionEn; recibidoPor = r.recepcionPor;
+          if (!('observaciones' in extra)) extra = { ...extra, observaciones: r.observaciones };
+        }
+      } catch (e) { /* sin conexión: se muestra sin la imagen de la firma */ }
+    }
+  }
+  toast('Preparando hoja…');
+  const ingreso = base.creadoEn || Date.now();
+  try {
+    S.docPages = await crearDocumento({
+      tipo: 'recepcion', numero: base.numero, fecha: ymd(new Date(ingreso)), hora: horaTxt(ingreso),
+      cliente: base.cliente, telefono: base.telefono, placa: base.placa, marca: base.marca,
+      km: base.km, combustible: base.combustible, descripcion: base.problema,
+      observaciones: 'observaciones' in extra ? extra.observaciones : base.observaciones,
+      condiciones: S.taller.condicionesRecepcion || CONDICIONES_DEFECTO,
+      firma, firmante, firmadoEn, recibidoPor
+    });
+  } catch (e) { return fail(e); }
+  S.docNombre = `Recepcion-${base.placa}-${ymd()}`;
+  openSheet('Hoja de recepción', `
+    <p class="sub">Así se verá la hoja. Compártela como PDF por WhatsApp o correo.</p>
+    ${S.docPages.map((c) => `<img class="doc-img" alt="Página del documento" src="${c.toDataURL('image/jpeg', 0.85)}">`).join('')}
+    <div class="btns"><button class="btn" data-act="doc-compartir">Compartir PDF</button><button class="btn sec" data-act="cerrar">Cerrar</button></div>`);
+}
+
+async function abrirRecepcion(id) {
+  const o = S.ordenes.find((x) => x.id === id);
+  if (!o) return;
+  const cond = S.taller.condicionesRecepcion || CONDICIONES_DEFECTO;
+  openSheet('Recepción del vehículo', `<form data-form="recepcion">
+    <input type="hidden" name="id" value="${esc(o.id)}">
+    <span class="placa grande">${esc(o.placa)}</span>
+    <dl class="kv">
+      <dt>Cliente</dt><dd>${esc(o.cliente || '—')}</dd>
+      <dt>Vehículo</dt><dd>${esc(o.marca || '—')}</dd>
+      <dt>Kilometraje</dt><dd>${o.km ? kmTxt(o.km) : '—'}</dd>
+      <dt>Combustible</dt><dd>${esc(o.combustible || '—')}</dd>
+      <dt>Problema</dt><dd>${esc(o.problema)}</dd>
+    </dl>
+    ${o.recepcionFirmada ? `<div class="alerta ambar">Ya tiene una firma del ${fechaCorta(ymd(new Date(o.recepcionEn)))}. Si firmas de nuevo, reemplaza la anterior.<br><button type="button" class="link" data-act="recepcion-ver" data-id="${esc(o.id)}">Ver la hoja firmada</button></div>` : ''}
+    <div class="campo"><label for="rc-o">Estado del vehículo al recibirlo</label><textarea id="rc-o" name="observaciones" placeholder="Ej: rayón en la puerta derecha, golpe en el parachoques trasero…">${esc(o.observaciones || '')}</textarea></div>
+    <p class="sub"><b>Condiciones:</b> ${esc(cond)}</p>
+    <label style="font-weight:600;font-size:15px">Firma del cliente (con el dedo)</label>
+    <canvas id="firma" class="firma-pad" width="800" height="300"></canvas>
+    <div class="campo"><label for="rc-n">Nombre de quien firma</label><input id="rc-n" name="firmante" value="${esc(o.firmante || o.cliente || '')}" autocomplete="off"></div>
+    <div class="btns">
+      <button type="button" class="btn sec" data-act="firma-borrar">Borrar firma</button>
+      <button class="btn" type="submit">Guardar firma y ver hoja</button>
+      <button type="button" class="link" data-act="recepcion-sinfirma" data-id="${esc(o.id)}">Ver la hoja sin firma</button>
+    </div></form>`);
+  FIRMA.vacio = true;
 }
 
 async function verDocumento(tipo, id) {
@@ -1171,6 +1336,7 @@ async function verDocumento(tipo, id) {
   try {
     S.docPages = await crearDocumento({
       tipo, numero: src.numero, fecha, cliente: src.cliente, telefono: src.telefono, placa: src.placa, marca: src.marca,
+      km: proforma ? null : src.km, combustible: proforma ? '' : src.combustible,
       descripcion: proforma ? src.descripcion : [src.problema, src.trabajos].filter(Boolean).join('. '),
       lineas, total: src.total, pagado: src.pagado, validez: src.validez
     });
@@ -1522,7 +1688,7 @@ function gastoUI(f) {
 }
 
 /* ---------- Desarrollo (solo Admin) ---------- */
-const COLS_DATOS = [['ordenes', 'Órdenes'], ['cotizaciones', 'Cotizaciones'], ['pagos', 'Cobros'], ['gastos', 'Gastos'], ['cierres', 'Cierres de caja'], ['vehiculos', 'Vehículos'], ['repuestos', 'Repuestos'], ['repuestosCosto', 'Costos de repuestos'], ['movimientosInv', 'Movimientos de inventario']];
+const COLS_DATOS = [['ordenes', 'Órdenes'], ['cotizaciones', 'Cotizaciones'], ['pagos', 'Cobros'], ['gastos', 'Gastos'], ['cierres', 'Cierres de caja'], ['vehiculos', 'Vehículos'], ['repuestos', 'Repuestos'], ['repuestosCosto', 'Costos de repuestos'], ['movimientosInv', 'Movimientos de inventario'], ['recepciones', 'Hojas de recepción']];
 
 function abrirDesarrollo() {
   if (!S.isAdmin) return;
@@ -1587,6 +1753,7 @@ function formTaller() {
     <div class="campo"><label for="t-e">Correo</label><input id="t-e" name="correo" type="email" value="${esc(t.correo || '')}"></div>
     <div class="campo"><label for="t-d">Dirección</label><input id="t-d" name="direccion" value="${esc(t.direccion || '')}"></div>
     <div class="campo"><label for="t-p">Nota al pie (opcional)</label><textarea id="t-p" name="notaPie" placeholder="Ej: Garantía de 30 días en mano de obra.">${esc(t.notaPie || '')}</textarea></div>
+    <div class="campo"><label for="t-cr">Condiciones de la hoja de recepción</label><textarea id="t-cr" name="condicionesRecepcion" style="min-height:130px">${esc(t.condicionesRecepcion || CONDICIONES_DEFECTO)}</textarea><span class="sub">Es un texto genérico. Revísalo y ajústalo a lo que quieras que acepte el cliente; para temas de responsabilidad conviene consultarlo con tu abogado.</span></div>
     <button class="btn" type="submit">Guardar datos</button></form>`);
 }
 
@@ -1684,6 +1851,17 @@ const ACT = {
   },
   'ir-cred': () => { S.tab = 'cred'; render(); window.scrollTo(0, 0); },
   'cred-filtro': (d) => { S.credFiltro = d.k; render(); },
+  recepcion: (d) => abrirRecepcion(d.id),
+  'recepcion-ver': (d) => verRecepcionDoc(d.id),
+  'recepcion-sinfirma': (d, el) => {
+    const f = el.closest('form');
+    verRecepcionDoc(d.id, { firma: null, recepcionEn: null, recepcionPor: null, observaciones: f.observaciones.value.trim() });
+  },
+  'firma-borrar': () => {
+    const c = $('#firma');
+    if (c) c.getContext('2d').clearRect(0, 0, c.width, c.height);
+    FIRMA.vacio = true;
+  },
   repuesto: (d) => verRepuesto(d.id),
   'repuesto-nuevo': () => formRepuesto(null),
   'repuesto-editar': (d) => formRepuesto(S.repuestos.find((x) => x.id === d.id)),
@@ -1752,6 +1930,30 @@ const ACT = {
   exportar,
   salir: () => { if (confirm('¿Cerrar sesión?')) signOut(auth); }
 };
+
+function posFirma(e) {
+  const c = $('#firma');
+  const r = c.getBoundingClientRect();
+  return [(e.clientX - r.left) * c.width / r.width, (e.clientY - r.top) * c.height / r.height];
+}
+document.addEventListener('pointerdown', (e) => {
+  if (e.target.id !== 'firma') return;
+  e.preventDefault();
+  e.target.setPointerCapture(e.pointerId);
+  const g = e.target.getContext('2d');
+  g.lineWidth = 5; g.lineCap = 'round'; g.lineJoin = 'round'; g.strokeStyle = '#1d2227';
+  const [x, y] = posFirma(e);
+  g.beginPath(); g.moveTo(x, y); g.lineTo(x + 0.1, y); g.stroke();
+  FIRMA.dibujando = true;
+  FIRMA.vacio = false;
+});
+document.addEventListener('pointermove', (e) => {
+  if (!FIRMA.dibujando || e.target.id !== 'firma') return;
+  const g = e.target.getContext('2d');
+  const [x, y] = posFirma(e);
+  g.lineTo(x, y); g.stroke();
+});
+['pointerup', 'pointercancel'].forEach((ev) => document.addEventListener(ev, () => { FIRMA.dibujando = false; }));
 
 document.addEventListener('click', (e) => {
   const t = e.target.closest('[data-act]');

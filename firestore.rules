@@ -19,7 +19,7 @@ service cloud.firestore {
       allow read, create: if signedIn();
       allow update: if isOwner() || (signedIn() &&
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(
-          ['estado','pagado','problema','trabajos','cliente','telefono','marca','total','entregadoEn','placa','lineas','marcaV','modelo','anio']));
+          ['estado','pagado','problema','trabajos','cliente','telefono','marca','total','entregadoEn','placa','lineas','marcaV','modelo','anio','km','combustible','observaciones','recepcionFirmada','recepcionEn']));
       allow delete: if isOwner();
     }
 
@@ -60,6 +60,32 @@ service cloud.firestore {
     match /categorias/{id} {
       allow read: if signedIn();
       allow write: if isOwner();
+    }
+
+    // Inventario: todos ven los repuestos; el Taller solo puede cambiar las existencias al usarlos en una orden
+    match /repuestos/{id} {
+      allow read: if signedIn();
+      allow create, delete: if isOwner();
+      allow update: if isOwner() || (signedIn() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['stock']));
+    }
+
+    // Costos de los repuestos: solo Dueño y Admin
+    match /repuestosCosto/{id} {
+      allow read, write: if isOwner();
+    }
+
+    // Movimientos de inventario: todos los leen y los crean; solo el dueño los modifica
+    match /movimientosInv/{id} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.creadoPor == request.auth.uid;
+      allow update, delete: if isOwner();
+    }
+
+    // Hojas de recepción firmadas (firma digital del cliente): todos las crean y leen; solo el dueño las borra
+    match /recepciones/{id} {
+      allow read, create, update: if signedIn();
+      allow delete: if isOwner();
     }
 
     // Cierres de caja: solo el dueño
