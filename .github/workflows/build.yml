@@ -37,14 +37,32 @@ jobs:
       - name: Generar proyecto Android
         run: npm run android:prepare
 
-      - name: Compilar APK
+      - name: Compilar y firmar APK
         working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          VERSION_CODE: ${{ github.run_number }}
         run: |
           chmod +x ./gradlew
-          ./gradlew assembleDebug --no-daemon
-
-      - name: Renombrar APK
-        run: cp android/app/build/outputs/apk/debug/app-debug.apk RiCar-Solutions.apk
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "Compilando versión de producción firmada con la llave fija"
+            ./gradlew assembleRelease --no-daemon
+            BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+            echo "Herramientas de firma: $BT"
+            echo "$KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/ricar.keystore"
+            "$BT/zipalign" -p -f 4 app/build/outputs/apk/release/app-release-unsigned.apk "$RUNNER_TEMP/alineado.apk"
+            "$BT/apksigner" sign --ks "$RUNNER_TEMP/ricar.keystore" --ks-key-alias "$KEY_ALIAS" \
+              --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
+              --out "$GITHUB_WORKSPACE/RiCar-Solutions.apk" "$RUNNER_TEMP/alineado.apk"
+            "$BT/apksigner" verify --print-certs "$GITHUB_WORKSPACE/RiCar-Solutions.apk" | head -3
+          else
+            echo "AVISO: no hay llave de firma configurada; se compila una versión de prueba (hay que desinstalar para actualizar)"
+            ./gradlew assembleDebug --no-daemon
+            cp app/build/outputs/apk/debug/app-debug.apk "$GITHUB_WORKSPACE/RiCar-Solutions.apk"
+          fi
 
       - name: Guardar APK como archivo de la ejecución
         uses: actions/upload-artifact@v4
